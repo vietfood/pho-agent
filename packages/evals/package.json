@@ -1,0 +1,15 @@
+{
+  "name": "@pho-agent/evals",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "eval": "bun src/cli.ts",
+    "lint": "eslint .",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@pho-agent/runtime",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./context-prompt-feature": "./src/context-prompt-feature.ts",
+    "./feature-api": "./src/feature-api.ts",
+    "./github-mcp": "./src/github-mcp/index.ts",
+    "./path-containment": "./src/path-containment.ts",
+    "./plan-agent": "./src/plan-agent/index.ts",
+    "./session-registry": "./src/session-registry.ts",
+    "./skills": "./src/skills/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@pho-agent/protocol": "workspace:*"
+  }
+}
