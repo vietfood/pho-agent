@@ -27,7 +27,7 @@ export const SKILL_SOURCE_ROOT_LABELS: Record<SkillSourceId, string> = {
 };
 
 export const SKILL_TRUST_NOTICE =
-  "Skills are instructions, not a sandbox. Enabling a source makes all of its skills available to insert with /. They are not added to the model until you insert one or ask for it by name. Existing permission, workspace, and remote-effect policy still gates tools, but it does not validate the instructions.";
+  "";
 
 export const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
