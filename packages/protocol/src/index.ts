@@ -5,4 +5,5 @@ export * from "./identity";
 export * from "./json";
 export * from "./plan-agent";
 export * from "./session";
+export * from "./session-title";
 export * from "./skills";
