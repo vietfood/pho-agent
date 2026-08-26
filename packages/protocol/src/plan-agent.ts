@@ -28,18 +28,21 @@ export interface SessionPlanSnapshot {
 }
 
 export interface SetSessionModeInput {
+  backendId?: string;
   sessionId: string;
   workspaceId?: string;
   mode: SessionAgentMode;
 }
 
 export interface UpdateSessionPlanDocumentInput {
+  backendId?: string;
   sessionId: string;
   workspaceId?: string;
   documentMarkdown: string;
 }
 
 export interface ExecuteSessionPlanInput {
+  backendId?: string;
   sessionId: string;
   workspaceId?: string;
 }

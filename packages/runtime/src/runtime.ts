@@ -17,6 +17,7 @@ import {
   type AgentTranscriptMessage,
   type Unsubscribe,
 } from "@pho-agent/protocol";
+import type { AgentScopeAdapter } from "@pho-agent/host";
 import type { AgentSession, AgentSessionEvent, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { FauxProviderHandle } from "@earendil-works/pi-ai";
 import {
@@ -31,13 +32,7 @@ import {
 } from "./pi-services";
 import { flattenAgentFeatures, type AgentFeature } from "./features";
 
-export interface AgentScopeResolution {
-  runtimeDirectory: string;
-}
-
-export interface AgentScopeAdapter {
-  resolve(scopeId: string): Promise<AgentScopeResolution> | AgentScopeResolution;
-}
+export type { AgentScopeAdapter, AgentScopeResolution } from "@pho-agent/host";
 
 export interface EvidenceProvider {
   id: string;

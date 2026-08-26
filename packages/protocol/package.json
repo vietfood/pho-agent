@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./backend": "./src/backend.ts",
     "./errors": "./src/errors.ts",
     "./github-mcp": "./src/github-mcp.ts",
     "./json": "./src/json.ts",

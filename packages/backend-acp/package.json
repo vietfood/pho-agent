@@ -1,0 +1,19 @@
+{
+  "name": "@pho-agent/backend-acp",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "@pho-agent/host": "workspace:*",
+    "@pho-agent/protocol": "workspace:*"
+  }
+}

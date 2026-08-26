@@ -2,8 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { AgentRuntimeEvent } from "@pho-agent/protocol";
-import { createAgentRuntime, listProductAgentSessions, type AgentProductAdapter } from "../src";
+import { createAgentHost } from "@pho-agent/host";
+import type { AgentBackendEvent } from "@pho-agent/protocol";
+import {
+  createAgentRuntime,
+  createPiAgentBackend,
+  listProductAgentSessions,
+  type AgentProductAdapter,
+} from "../src";
 import { createDeterministicAgentProvider } from "../src/testing";
 
 async function fixture(): Promise<{ agentDir: string; product: AgentProductAdapter }> {
@@ -28,7 +34,7 @@ async function fixture(): Promise<{ agentDir: string; product: AgentProductAdapt
   };
 }
 
-async function waitFor(events: AgentRuntimeEvent[], type: AgentRuntimeEvent["type"]): Promise<void> {
+async function waitFor(events: AgentBackendEvent[], type: AgentBackendEvent["type"]): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!events.some((event) => event.type === type)) {
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${type}.`);
@@ -39,15 +45,17 @@ async function waitFor(events: AgentRuntimeEvent[], type: AgentRuntimeEvent["typ
 describe("headless non-code consumer", () => {
   test("creates, prompts, settles, reopens, and persists an opaque scope", async () => {
     const { agentDir, product } = await fixture();
-    const events: AgentRuntimeEvent[] = [];
-    const first = await createAgentRuntime({
-      agentDir,
-      product,
-      testProvider: createDeterministicAgentProvider(),
-      systemPrompt: "You are a deterministic non-code fixture.",
-    });
+    const events: AgentBackendEvent[] = [];
+    const first = createAgentHost([
+      await createPiAgentBackend({
+        agentDir,
+        product,
+        testProvider: createDeterministicAgentProvider(),
+        systemPrompt: "You are a deterministic non-code fixture.",
+      }),
+    ]);
     const stop = first.subscribe((event) => events.push(event));
-    const created = await first.createSession("memory:case-1");
+    const created = await first.createSession({ backendId: "pi", scopeId: "memory:case-1" });
     const admission = await first.sendPrompt({ ...created.key, text: "hello" });
     expect(admission.admitted).toBe(true);
     await waitFor(events, "run_settled");
@@ -57,12 +65,14 @@ describe("headless non-code consumer", () => {
     stop();
     await first.dispose();
 
-    const second = await createAgentRuntime({
-      agentDir,
-      product,
-      testProvider: createDeterministicAgentProvider(),
-      systemPrompt: "You are a deterministic non-code fixture.",
-    });
+    const second = createAgentHost([
+      await createPiAgentBackend({
+        agentDir,
+        product,
+        testProvider: createDeterministicAgentProvider(),
+        systemPrompt: "You are a deterministic non-code fixture.",
+      }),
+    ]);
     try {
       expect(await listProductAgentSessions(product, agentDir, "memory:case-1")).toContain(created.key.sessionId);
       const reopened = await second.openSession(created.key);

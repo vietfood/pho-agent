@@ -4,15 +4,29 @@ export type AgentRunStatus = "idle" | "running" | "settled" | "failed" | "cancel
 
 export interface AgentTextBlock {
   type: "text";
+  id?: string;
   text: string;
 }
+
+export type AgentToolKind =
+  | "command"
+  | "file-change"
+  | "mcp"
+  | "web-search"
+  | "image"
+  | "review"
+  | "subagent"
+  | "other";
 
 export interface AgentToolBlock {
   type: "tool";
   id: string;
   name: string;
+  kind?: AgentToolKind;
   status: "running" | "completed" | "failed";
-  text?: string;
+  title?: string;
+  input?: string;
+  output?: string;
 }
 
 export type AgentTranscriptBlock = AgentTextBlock | AgentToolBlock;
