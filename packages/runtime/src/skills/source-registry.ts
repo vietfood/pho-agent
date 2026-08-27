@@ -9,6 +9,7 @@ import {
   SKILL_SOURCE_LABELS,
   SKILL_SOURCE_ROOT_LABELS,
   SKILL_TRUST_NOTICE,
+  availableAgentSkills,
   extractSkillTokens,
   isExternalSkillSourceId,
   isSkillSourceId,
@@ -61,6 +62,7 @@ export interface SkillSourceRegistry {
   effectiveSkillPaths(): string[];
   readSkillMarkdown(sourceId: SkillSourceId, skillName: string): string | undefined;
   loadNamedSkill(skillName: string, sourceId?: string): NamedSkillBody | undefined;
+  listInvocableSkills(): SkillInventoryEntry[];
   expandInsertedSkills(text: string): string;
   setEnabledExternalSources(sourceIds: readonly string[]): ExternalSkillSourceId[];
   setSourceEnabled(sourceId: ExternalSkillSourceId, enabled: boolean): SkillSettingsSnapshot;
@@ -76,6 +78,7 @@ interface DiscoveredSkill {
   reason?: string;
   skillDir: string;
   markdown?: string;
+  disableModelInvocation?: boolean;
 }
 
 const EXTERNAL_SKILL_ROOTS: Record<ExternalSkillSourceId, string> = {
@@ -147,6 +150,9 @@ export function createSkillSourceRegistry(options: SkillSourceRegistryOptions): 
         }
       }
       return undefined;
+    },
+    listInvocableSkills() {
+      return availableAgentSkills(current);
     },
     expandInsertedSkills(text) {
       const blocks: string[] = [];
@@ -283,6 +289,7 @@ function toEntry(skill: DiscoveredSkill): SkillInventoryEntry {
     ...(skill.description ? { description: skill.description } : {}),
     compatibility: skill.compatibility,
     ...(skill.reason ? { reason: skill.reason } : {}),
+    ...(skill.disableModelInvocation ? { disableModelInvocation: true } : {}),
   };
 }
 
@@ -428,6 +435,7 @@ function admitSkill(
       : {}),
     skillDir: resolvedDir,
     markdown,
+    ...(parsed.disableModelInvocation ? { disableModelInvocation: true } : {}),
   };
 }
 
@@ -468,7 +476,9 @@ function skillRequiresAuxiliaryAssets(skillDir: string): boolean {
   return false;
 }
 
-export function parseSkillFrontmatter(markdown: string): { name: string; description: string } | undefined {
+export function parseSkillFrontmatter(
+  markdown: string,
+): { name: string; description: string; disableModelInvocation?: boolean } | undefined {
   const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
   if (!match?.[1]) {
     return undefined;
@@ -478,7 +488,16 @@ export function parseSkillFrontmatter(markdown: string): { name: string; descrip
   if (!name || !description) {
     return undefined;
   }
-  return { name, description };
+  return {
+    name,
+    description,
+    ...(booleanField(match[1], "disable-model-invocation") ? { disableModelInvocation: true } : {}),
+  };
+}
+
+function booleanField(frontmatter: string, field: string): boolean {
+  const value = scalarField(frontmatter, field)?.toLowerCase();
+  return value === "true" || value === "yes";
 }
 
 function scalarField(frontmatter: string, field: string): string | undefined {

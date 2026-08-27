@@ -7,13 +7,54 @@ export interface AgentSkillBody {
   markdown: string;
 }
 
+export interface AgentSkillCatalogEntry {
+  sourceId: string;
+  skillName: string;
+  displayName: string;
+  description?: string;
+}
+
 export interface AgentSkillProvider {
   loadNamedSkill(skillName: string, sourceId?: string): AgentSkillBody | undefined;
+  listInvocableSkills(): readonly AgentSkillCatalogEntry[];
 }
 
 export const SKILL_INVOKE_FEATURE_ID = "skill-invoke";
 export const SKILL_INVOKE_FEATURE_VERSION = "1.0.0";
 export const READ_SKILL_TOOL_NAME = "read_skill";
+export const READ_SKILL_PROMPT_SNIPPET = "Load a named skill when the current task matches its description.";
+export const READ_SKILL_PROMPT_GUIDELINES = [
+  "Call read_skill when a listed skill matches the current task.",
+  "Do not wait for the owner to name or insert the skill.",
+  "Skip read_skill when the owner already inserted that skill with /.",
+  "Load one skill at a time. Do not dump the catalog.",
+] as const;
+export const READ_SKILL_MISSING_TEXT =
+  "No enabled skill matches that name. Use a name from available_skills, or insert the skill with /.";
+
+export function formatInvocableSkillCatalog(skills: readonly AgentSkillCatalogEntry[]): string {
+  if (skills.length === 0) {
+    return "No invocable skills are currently available.";
+  }
+  const lines = ["<available_skills>"];
+  for (const skill of skills) {
+    lines.push("  <skill>");
+    lines.push(`    <name>${escapeXml(skill.skillName)}</name>`);
+    if (skill.description) {
+      lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+    }
+    lines.push("  </skill>");
+  }
+  lines.push("</available_skills>");
+  return lines.join("\n");
+}
+
+export function readSkillToolDescription(skills: AgentSkillProvider): string {
+  return [
+    "Load Markdown instructions for one named skill from an owner-enabled source. Call this when the current task matches a skill description. Do not wait for the owner to insert it with /.",
+    formatInvocableSkillCatalog(skills.listInvocableSkills()),
+  ].join("\n\n");
+}
 
 export function createSkillInvokeFeature(skills: AgentSkillProvider): AgentFeature {
   return {
@@ -32,14 +73,13 @@ function createSkillInvokeExtension(skills: AgentSkillProvider): InlineExtension
         defineTool({
           name: READ_SKILL_TOOL_NAME,
           label: "Read skill",
-          description:
-            "Load Markdown instructions for one named skill from an owner-enabled source. Use only when the owner names that skill. Do not browse or dump the catalog.",
-          promptSnippet: "Load a named skill only when the owner asks for it by name.",
-          promptGuidelines: [
-            "Call read_skill only when the owner names a skill.",
-            "Prefer a skill the owner already inserted with /.",
-            "Do not list, search, or dump available skills.",
-          ],
+          // Pi reads description when composing the tool prompt, so a getter
+          // keeps Refresh skills live without re-registering the tool.
+          get description() {
+            return readSkillToolDescription(skills);
+          },
+          promptSnippet: READ_SKILL_PROMPT_SNIPPET,
+          promptGuidelines: [...READ_SKILL_PROMPT_GUIDELINES],
           parameters: Type.Object({
             name: Type.String({ description: "Skill directory name, for example repository-investigation" }),
             source: Type.Optional(
@@ -53,12 +93,7 @@ function createSkillInvokeExtension(skills: AgentSkillProvider): InlineExtension
             const loaded = skills.loadNamedSkill(params.name, params.source);
             if (!loaded) {
               return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: "No enabled skill matches that name. Insert it with / or name a skill from an enabled source.",
-                  },
-                ],
+                content: [{ type: "text" as const, text: READ_SKILL_MISSING_TEXT }],
                 details: undefined,
               };
             }
@@ -71,4 +106,13 @@ function createSkillInvokeExtension(skills: AgentSkillProvider): InlineExtension
       );
     },
   };
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }

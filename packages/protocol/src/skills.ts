@@ -27,7 +27,7 @@ export const SKILL_SOURCE_ROOT_LABELS: Record<SkillSourceId, string> = {
 };
 
 export const SKILL_TRUST_NOTICE =
-  "Skills are instructions, not a sandbox. Enabling a source makes all of its skills available to insert with /. They are not added to the model until you insert one or ask for it by name. Existing permission, workspace, and remote-effect policy still gates tools, but it does not validate the instructions.";
+  "Skills are instructions, not a sandbox. Enabling a source makes its skills available in / and to the agent. The model sees names and descriptions; full instructions load when you insert a skill or the agent reads it. Existing permission, workspace, and remote-effect policy still gates tools, but it does not validate the instructions.";
 
 export const MAX_SKILL_DESCRIPTION_CHARS = 240;
 
@@ -58,6 +58,7 @@ export interface SkillInventoryEntry {
   compatibility: SkillCompatibility;
   reason?: string;
   shadowedBy?: SkillShadowRef;
+  disableModelInvocation?: boolean;
 }
 
 export interface SkillSourceSummary {
@@ -160,6 +161,14 @@ export function stripExpandedSkillBodies(text: string): string {
 
 export function skillNeedsCompatibilityNotice(compatibility: SkillCompatibility): boolean {
   return compatibility === "limited" || compatibility === "incompatible";
+}
+
+export function availableAgentSkills(snapshot: SkillSettingsSnapshot): SkillInventoryEntry[] {
+  return snapshot.inventory.filter(
+    (entry) =>
+      (entry.compatibility === "compatible" || entry.compatibility === "limited") &&
+      !entry.disableModelInvocation,
+  );
 }
 
 export function availableSlashSkills(
