@@ -1,12 +1,24 @@
 import type { AgentScopeKey } from "./identity";
 import type { AgentInteractionRequest } from "./interaction";
-import type { AgentSessionSnapshot } from "./session";
+import type { AgentSessionSnapshot, AgentToolBlock } from "./session";
 
 export type AgentRuntimeEvent =
   | (AgentScopeKey & {
       type: "session_snapshot";
       occurredAt: string;
       snapshot: AgentSessionSnapshot;
+    })
+  | (AgentScopeKey & {
+      type: "text_delta";
+      occurredAt: string;
+      runId: string;
+      delta: string;
+    })
+  | (AgentScopeKey & {
+      type: "tool_update";
+      occurredAt: string;
+      runId: string;
+      tool: AgentToolBlock;
     })
   | (AgentScopeKey & {
       type: "run_started" | "run_settled" | "run_cancelled";

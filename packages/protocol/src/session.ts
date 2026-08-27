@@ -37,6 +37,34 @@ export interface AgentTranscriptMessage {
   blocks: AgentTranscriptBlock[];
 }
 
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  supportsImages?: boolean;
+}
+
+export interface AgentModelState {
+  available: AgentModelOption[];
+  currentId?: string;
+}
+
+export interface AgentReasoningOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface AgentReasoningState {
+  available: AgentReasoningOption[];
+  currentId?: string;
+}
+
+export interface AgentFastModeState {
+  enabled: boolean;
+  description?: string;
+}
+
 export interface AgentSessionSnapshot {
   key: AgentScopeKey;
   run: {
@@ -45,6 +73,21 @@ export interface AgentSessionSnapshot {
     error?: string;
   };
   messages: AgentTranscriptMessage[];
+  model?: AgentModelState;
+  reasoning?: AgentReasoningState;
+  fastMode?: AgentFastModeState;
+}
+
+export interface AgentSetModelInput extends AgentScopeKey {
+  modelId: string;
+}
+
+export interface AgentSetReasoningInput extends AgentScopeKey {
+  reasoningId: string;
+}
+
+export interface AgentSetFastModeInput extends AgentScopeKey {
+  enabled: boolean;
 }
 
 export interface AgentPromptInput extends AgentScopeKey {

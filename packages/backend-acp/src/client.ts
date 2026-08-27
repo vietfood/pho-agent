@@ -11,14 +11,16 @@ import {
   type PromptResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionConfigOption,
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { Unsubscribe } from "@pho-agent/protocol";
 
 export interface AcpClient {
   initialize(): Promise<InitializeResponse>;
-  createSession(cwd: string): Promise<string>;
-  openSession(sessionId: string, cwd: string): Promise<void>;
+  createSession(cwd: string): Promise<AcpSessionState>;
+  openSession(sessionId: string, cwd: string): Promise<SessionConfigOption[]>;
+  setSessionConfigOption(sessionId: string, configId: string, value: string): Promise<SessionConfigOption[]>;
   prompt(sessionId: string, text: string): Promise<PromptResponse>;
   cancel(sessionId: string): Promise<void>;
   setPermissionHandler(
@@ -26,6 +28,11 @@ export interface AcpClient {
   ): Unsubscribe;
   subscribe(listener: (notification: SessionNotification) => void): Unsubscribe;
   dispose(): Promise<void>;
+}
+
+export interface AcpSessionState {
+  sessionId: string;
+  configOptions: SessionConfigOption[];
 }
 
 export interface CreateAcpStdioClientOptions {
@@ -109,7 +116,7 @@ class SdkAcpClient implements AcpClient {
     try {
       this.#initialize = await this.#context.request(methods.agent.initialize, {
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
+        clientCapabilities: { _meta: { terminal_output: true } },
         clientInfo: { name: "pho-code", title: "Pho Code", version: "0.0.0" },
       });
       if (this.#initialize.protocolVersion !== PROTOCOL_VERSION) {
@@ -129,23 +136,37 @@ class SdkAcpClient implements AcpClient {
     }
   }
 
-  async createSession(cwd: string): Promise<string> {
+  async createSession(cwd: string): Promise<AcpSessionState> {
     this.#requireInitialized();
     const response = await this.#context.request(methods.agent.session.new, { cwd, mcpServers: [] });
-    return response.sessionId;
+    return { sessionId: response.sessionId, configOptions: response.configOptions ?? [] };
   }
 
-  async openSession(sessionId: string, cwd: string): Promise<void> {
+  async openSession(sessionId: string, cwd: string): Promise<SessionConfigOption[]> {
     const capabilities = this.#requireInitialized().agentCapabilities;
     if (capabilities?.loadSession) {
-      await this.#context.request(methods.agent.session.load, { sessionId, cwd, mcpServers: [] });
-      return;
+      const response = await this.#context.request(methods.agent.session.load, { sessionId, cwd, mcpServers: [] });
+      return response.configOptions ?? [];
     }
     if (capabilities?.sessionCapabilities?.resume) {
-      await this.#context.request(methods.agent.session.resume, { sessionId, cwd, mcpServers: [] });
-      return;
+      const response = await this.#context.request(methods.agent.session.resume, { sessionId, cwd, mcpServers: [] });
+      return response.configOptions ?? [];
     }
     throw new Error("The ACP agent cannot load or resume sessions.");
+  }
+
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: string,
+    value: string,
+  ): Promise<SessionConfigOption[]> {
+    this.#requireInitialized();
+    const response = await this.#context.request(methods.agent.session.setConfigOption, {
+      sessionId,
+      configId,
+      value,
+    });
+    return response.configOptions;
   }
 
   prompt(sessionId: string, text: string): Promise<PromptResponse> {

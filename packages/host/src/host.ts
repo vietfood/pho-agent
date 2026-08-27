@@ -12,6 +12,9 @@ import {
   type AgentBackendQueueAdmission,
   type AgentBackendScope,
   type AgentBackendScopeKey,
+  type AgentBackendSetModelInput,
+  type AgentBackendSetFastModeInput,
+  type AgentBackendSetReasoningInput,
   type AgentBackendSessionSnapshot,
   type AgentBackendSteerInput,
   type AgentFollowUpInput,
@@ -21,6 +24,9 @@ import {
   type AgentQueueAdmission,
   type AgentRuntimeEvent,
   type AgentScopeKey,
+  type AgentSetModelInput,
+  type AgentSetFastModeInput,
+  type AgentSetReasoningInput,
   type AgentSessionSnapshot,
   type AgentSteerInput,
   type Unsubscribe,
@@ -32,6 +38,9 @@ export interface AgentBackendAdapter {
   getSessionSnapshot(key: AgentScopeKey): Promise<AgentSessionSnapshot>;
   createSession(scopeId: string): Promise<AgentSessionSnapshot>;
   openSession(key: AgentScopeKey): Promise<AgentSessionSnapshot>;
+  setModel?(input: AgentSetModelInput): Promise<AgentSessionSnapshot>;
+  setReasoning?(input: AgentSetReasoningInput): Promise<AgentSessionSnapshot>;
+  setFastMode?(input: AgentSetFastModeInput): Promise<AgentSessionSnapshot>;
   sendPrompt(input: AgentPromptInput): Promise<AgentPromptAdmission>;
   steerRun?(input: AgentSteerInput): Promise<AgentQueueAdmission>;
   queueFollowUp?(input: AgentFollowUpInput): Promise<AgentQueueAdmission>;
@@ -46,6 +55,9 @@ export interface AgentHost {
   getSessionSnapshot(key: AgentBackendScopeKey): Promise<AgentBackendSessionSnapshot>;
   createSession(scope: AgentBackendScope): Promise<AgentBackendSessionSnapshot>;
   openSession(key: AgentBackendScopeKey): Promise<AgentBackendSessionSnapshot>;
+  setModel(input: AgentBackendSetModelInput): Promise<AgentBackendSessionSnapshot>;
+  setReasoning(input: AgentBackendSetReasoningInput): Promise<AgentBackendSessionSnapshot>;
+  setFastMode(input: AgentBackendSetFastModeInput): Promise<AgentBackendSessionSnapshot>;
   sendPrompt(input: AgentBackendPromptInput): Promise<AgentBackendPromptAdmission>;
   steerRun(input: AgentBackendSteerInput): Promise<AgentBackendQueueAdmission>;
   queueFollowUp(input: AgentBackendFollowUpInput): Promise<AgentBackendQueueAdmission>;
@@ -77,7 +89,7 @@ export function createAgentHost(adapters: readonly AgentBackendAdapter[]): Agent
     return registry.resolve(backendId).adapter;
   }
 
-  function requireOperation<K extends "steerRun" | "queueFollowUp" | "resolveInteraction">(
+  function requireOperation<K extends "setModel" | "setReasoning" | "setFastMode" | "steerRun" | "queueFollowUp" | "resolveInteraction">(
     backendId: string,
     operation: K,
   ): NonNullable<AgentBackendAdapter[K]> {
@@ -131,6 +143,30 @@ export function createAgentHost(adapters: readonly AgentBackendAdapter[]): Agent
     async openSession(key) {
       const normalized = normalizeAgentBackendScopeKey(key);
       return snapshot(normalized.backendId, await resolve(normalized.backendId).openSession(scopeKey(normalized)));
+    },
+    async setModel(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "setModel")({
+        ...scopeKey(normalized),
+        modelId: input.modelId,
+      });
+      return snapshot(normalized.backendId, value);
+    },
+    async setReasoning(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "setReasoning")({
+        ...scopeKey(normalized),
+        reasoningId: input.reasoningId,
+      });
+      return snapshot(normalized.backendId, value);
+    },
+    async setFastMode(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "setFastMode")({
+        ...scopeKey(normalized),
+        enabled: input.enabled,
+      });
+      return snapshot(normalized.backendId, value);
     },
     async sendPrompt(input) {
       const normalized = normalizeAgentBackendScopeKey(input);

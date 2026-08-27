@@ -18,6 +18,26 @@ class FakeConnection implements CodexAppServerConnection {
   async request(method: string, params?: unknown): Promise<unknown> {
     this.requests.push({ method, params });
     if (method === "initialize") return { userAgent: this.userAgent };
+    if (method === "model/list") return {
+      data: [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          displayName: "GPT-5.4",
+          inputModalities: ["text", "image"],
+          isDefault: true,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Faster" },
+            { reasoningEffort: "medium", description: "Balanced" },
+            { reasoningEffort: "high", description: "Deeper" },
+          ],
+          serviceTiers: [{ id: "fast", name: "Fast", description: "Faster responses" }],
+        },
+        { id: "gpt-5.3-codex", model: "gpt-5.3-codex", displayName: "GPT-5.3 Codex", inputModalities: ["text"] },
+      ],
+      nextCursor: null,
+    };
     if (method === "thread/start") return { thread: { id: "thread-1", turns: [] } };
     if (method === "thread/resume") {
       return {
@@ -97,6 +117,10 @@ describe("Codex backend adapter", () => {
       },
     });
     connection.emit({
+      method: "item/commandExecution/outputDelta",
+      params: { threadId: "thread-1", turnId: admission.runId, itemId: "tool-1", delta: "cle" },
+    });
+    connection.emit({
       method: "item/completed",
       params: {
         threadId: "thread-1",
@@ -151,12 +175,65 @@ describe("Codex backend adapter", () => {
     await backend.dispose();
   });
 
-  test("fails closed before initialized when the app-server schema version is incompatible", async () => {
+  test("discovers models, applies a per-turn model, and emits text deltas", async () => {
+    const connection = new FakeConnection();
+    const backend = await createCodexBackend({ connection, scope });
+    const events: Array<{ type: string; delta?: string }> = [];
+    backend.subscribe((event) => events.push({
+      type: event.type,
+      ...(event.type === "text_delta" ? { delta: event.delta } : {}),
+    }));
+
+    const created = await backend.createSession("workspace");
+    expect(created.model).toEqual({
+      currentId: "gpt-5.4",
+      available: [
+        { id: "gpt-5.4", label: "GPT-5.4", supportsImages: true },
+        { id: "gpt-5.3-codex", label: "GPT-5.3 Codex", supportsImages: false },
+      ],
+    });
+    expect(created.reasoning?.currentId).toBe("medium");
+    expect(created.fastMode).toEqual({ enabled: false, description: "Faster responses" });
+    await backend.setReasoning?.({ ...created.key, reasoningId: "high" });
+    await backend.setFastMode?.({ ...created.key, enabled: true });
+    const configured = await backend.sendPrompt({ ...created.key, text: "configured" });
+    expect(connection.requests.findLast(({ method }) => method === "turn/start")?.params).toMatchObject({
+      effort: "high",
+      serviceTier: "fast",
+    });
+    connection.emit({
+      method: "turn/completed",
+      params: { threadId: created.key.sessionId, turn: { id: configured.runId, status: "completed", items: [] } },
+    });
+    const changed = await backend.setModel?.({ ...created.key, modelId: "gpt-5.3-codex" });
+    expect(changed?.model?.currentId).toBe("gpt-5.3-codex");
+    const admission = await backend.sendPrompt({ ...created.key, text: "stream" });
+    expect(connection.requests.findLast(({ method }) => method === "turn/start")?.params).toMatchObject({
+      model: "gpt-5.3-codex",
+    });
+    connection.emit({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: created.key.sessionId,
+        turnId: admission.runId,
+        itemId: "message-1",
+        delta: "Hello",
+      },
+    });
+    expect(events.at(-1)).toEqual({ type: "text_delta", delta: "Hello" });
+    expect((await backend.getSessionSnapshot(created.key)).messages.at(-1)?.blocks).toEqual([
+      { type: "text", id: "message-1", text: "Hello" },
+    ]);
+    await backend.dispose();
+  });
+
+  test("accepts a different Codex build after a successful protocol initialization", async () => {
     const connection = new FakeConnection();
     connection.userAgent = "codex-cli/0.150.0";
-    await expect(createCodexBackend({ connection, scope })).rejects.toThrow("supports Codex app-server 0.149.1");
-    expect(connection.notifications).toEqual([]);
-    expect(connection.disposed).toBe(true);
+    const backend = await createCodexBackend({ connection, scope });
+    expect(connection.notifications).toEqual([{ method: "initialized", params: undefined }]);
+    expect(connection.disposed).toBe(false);
+    await backend.dispose();
   });
 
   test("projects command approval and request-user-input through backend-neutral interactions", async () => {
@@ -223,6 +300,81 @@ describe("Codex backend adapter", () => {
     await Promise.resolve();
     await backend.abortRun(admission);
     expect(await cancelled).toEqual({ decision: "cancel" });
+    await backend.dispose();
+  });
+
+  test("passes product instructions and executes an owned dynamic tool", async () => {
+    const connection = new FakeConnection();
+    const calls: Array<{ scopeId: string; query: unknown }> = [];
+    const backend = await createCodexBackend({
+      connection,
+      scope,
+      developerInstructions: "Use Pho Code product tools only for their documented purpose.",
+      dynamicTools: [{
+        type: "function",
+        name: "pho_search_workspace_references",
+        description: "Search indexed workspace paths.",
+        inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        async execute(call) {
+          calls.push({ scopeId: call.scopeId, query: (call.arguments as { query?: unknown }).query });
+          return JSON.stringify({ suggestions: [{ path: "src/index.ts", kind: "file" }], status: "ready" });
+        },
+      }],
+    });
+    const created = await backend.createSession("workspace");
+    expect(connection.requests.find(({ method }) => method === "thread/start")?.params).toMatchObject({
+      developerInstructions: "Use Pho Code product tools only for their documented purpose.",
+      dynamicTools: [{
+        type: "function",
+        name: "pho_search_workspace_references",
+        description: "Search indexed workspace paths.",
+      }],
+    });
+    const admission = await backend.sendPrompt({ ...created.key, text: "find index" });
+    const result = await connection.emitRequest({
+      id: 50,
+      method: "item/tool/call",
+      params: {
+        threadId: created.key.sessionId,
+        turnId: admission.runId,
+        callId: "call-1",
+        tool: "pho_search_workspace_references",
+        arguments: { query: "index" },
+      },
+    });
+    expect(calls).toEqual([{ scopeId: "workspace", query: "index" }]);
+    expect(result).toEqual({
+      success: true,
+      contentItems: [{
+        type: "inputText",
+        text: JSON.stringify({ suggestions: [{ path: "src/index.ts", kind: "file" }], status: "ready" }),
+      }],
+    });
+    connection.emit({
+      method: "item/completed",
+      params: {
+        threadId: created.key.sessionId,
+        turnId: admission.runId,
+        item: {
+          type: "dynamicToolCall",
+          id: "call-1",
+          tool: "pho_search_workspace_references",
+          arguments: { query: "index" },
+          status: "completed",
+          success: true,
+          contentItems: [{ type: "inputText", text: "src/index.ts" }],
+        },
+      },
+    });
+    expect((await backend.getSessionSnapshot(created.key)).messages.at(-1)?.blocks).toEqual([{
+      type: "tool",
+      id: "call-1",
+      name: "Pho Code: pho_search_workspace_references",
+      kind: "other",
+      status: "completed",
+      input: JSON.stringify({ query: "index" }),
+      output: "src/index.ts",
+    }]);
     await backend.dispose();
   });
 });

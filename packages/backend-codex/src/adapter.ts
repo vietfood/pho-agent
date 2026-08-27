@@ -7,6 +7,7 @@ import {
   type AgentBackendDescriptor,
   type AgentInteractionRequest,
   type AgentInteractionResolution,
+  type AgentModelOption,
   type AgentRuntimeEvent,
   type AgentScopeKey,
   type AgentSessionSnapshot,
@@ -20,14 +21,23 @@ import {
   type CodexNotification,
   type CodexServerRequest,
 } from "./connection";
-import type { CodexThread, CodexThreadItem, CodexThreadResponse, CodexTurn, CodexTurnResponse } from "./wire";
-
-export const CODEX_APP_SERVER_TESTED_VERSION = "0.149.1";
+import type {
+  CodexDynamicToolSpec,
+  CodexModelListResponse,
+  CodexThread,
+  CodexThreadItem,
+  CodexThreadResponse,
+  CodexTurn,
+  CodexTurnResponse,
+} from "./wire";
 
 export const CODEX_BACKEND_DESCRIPTOR: AgentBackendDescriptor = {
   id: "codex",
   label: "Codex",
   capabilities: {
+    "model-selection": "experimental",
+    "reasoning-selection": "native",
+    "fast-mode": "native",
     steering: "experimental",
     approvals: "experimental",
     images: "experimental",
@@ -37,15 +47,31 @@ export const CODEX_BACKEND_DESCRIPTOR: AgentBackendDescriptor = {
     "native-review": "experimental",
     skills: "experimental",
     mcp: "experimental",
+    "dynamic-tools": "experimental",
     "structured-file-changes": "experimental",
   },
 };
+
+export interface CodexDynamicToolCall {
+  scopeId: string;
+  sessionId: string;
+  turnId: string;
+  callId: string;
+  arguments: unknown;
+  signal: AbortSignal;
+}
+
+export interface CodexDynamicTool extends CodexDynamicToolSpec {
+  execute(call: CodexDynamicToolCall): Promise<string>;
+}
 
 export interface CreateCodexBackendOptions {
   scope: AgentScopeAdapter;
   connection?: CodexAppServerConnection;
   command?: string;
   model?: string;
+  developerInstructions?: string;
+  dynamicTools?: readonly CodexDynamicTool[];
 }
 
 /** Defers process launch and protocol initialization until the backend is first used. */
@@ -71,6 +97,21 @@ export function createLazyCodexBackend(options: CreateCodexBackendOptions): Agen
     getSessionSnapshot: async (key) => (await load()).getSessionSnapshot(key),
     createSession: async (scopeId) => (await load()).createSession(scopeId),
     openSession: async (key) => (await load()).openSession(key),
+    setModel: async (input) => {
+      const created = await load();
+      if (!created.setModel) throw new Error("The Codex backend does not support model selection.");
+      return created.setModel(input);
+    },
+    setReasoning: async (input) => {
+      const created = await load();
+      if (!created.setReasoning) throw new Error("The Codex backend does not support reasoning selection.");
+      return created.setReasoning(input);
+    },
+    setFastMode: async (input) => {
+      const created = await load();
+      if (!created.setFastMode) throw new Error("The Codex backend does not support Fast mode.");
+      return created.setFastMode(input);
+    },
     sendPrompt: async (input) => (await load()).sendPrompt(input),
     steerRun: async (input) => {
       const created = await load();
@@ -104,6 +145,9 @@ interface LiveSession {
   run: AgentSessionSnapshot["run"];
   messages: AgentTranscriptMessage[];
   assistantByTurn: Map<string, number>;
+  modelId?: string;
+  reasoningId?: string;
+  fastMode: boolean;
 }
 
 interface PendingCodexInteraction {
@@ -114,23 +158,33 @@ interface PendingCodexInteraction {
   resolve(value: unknown): void;
 }
 
+interface PendingDynamicToolCall {
+  live: LiveSession;
+  controller: AbortController;
+}
+
 export async function createCodexBackend(options: CreateCodexBackendOptions): Promise<AgentBackendAdapter> {
+  const dynamicTools = normalizeDynamicTools(options.dynamicTools ?? []);
   const connection = options.connection ?? createCodexStdioConnection(options.command);
   try {
-    const initialized = await connection.request("initialize", {
+    await connection.request("initialize", {
       clientInfo: { name: "pho_code", title: "Pho Code", version: "0.0.0" },
       capabilities: { experimentalApi: true, requestAttestation: false },
-    }) as { userAgent?: string };
-    requireTestedCodexVersion(initialized.userAgent);
+    });
   } catch (error) {
     await connection.dispose();
     throw error;
   }
   connection.notify("initialized");
 
+  const models = await discoverModels(connection, options.model);
+  const defaultModelId = options.model ?? models.find((model) => model.isDefault)?.id ?? models[0]?.id;
+  const dynamicToolByName = new Map(dynamicTools.map((tool) => [tool.name, tool]));
+
   const sessions = new Map<string, LiveSession>();
   const sessionsById = new Map<string, LiveSession>();
   const pendingInteractions = new Map<string, PendingCodexInteraction>();
+  const pendingDynamicTools = new Map<string, PendingDynamicToolCall>();
   const listeners = new Set<(event: AgentRuntimeEvent) => void>();
   let disposed = false;
 
@@ -143,13 +197,47 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
   }
 
   function snapshot(live: LiveSession): AgentSessionSnapshot {
-    return { key: live.key, run: { ...live.run }, messages: structuredClone(live.messages) };
+    const selected = models.find((model) => model.id === live.modelId);
+    const fast = selected?.serviceTiers.find((tier) => tier.id === "fast");
+    return {
+      key: live.key,
+      run: { ...live.run },
+      messages: structuredClone(live.messages),
+      ...(models.length > 0 ? {
+        model: {
+          available: models.map(({ isDefault: _isDefault, reasoning: _reasoning, defaultReasoningId: _defaultReasoningId, serviceTiers: _serviceTiers, ...model }) => model),
+          ...(live.modelId ? { currentId: live.modelId } : {}),
+        },
+      } : {}),
+      ...(selected?.reasoning.length ? {
+        reasoning: {
+          available: selected.reasoning,
+          ...(live.reasoningId ? { currentId: live.reasoningId } : {}),
+        },
+      } : {}),
+      ...(fast ? {
+        fastMode: {
+          enabled: live.fastMode,
+          ...(fast.description ? { description: fast.description } : {}),
+        },
+      } : {}),
+    };
   }
 
   function publish(live: LiveSession): AgentSessionSnapshot {
     const value = snapshot(live);
     emit({ ...live.key, type: "session_snapshot", occurredAt: new Date().toISOString(), snapshot: value });
     return value;
+  }
+
+  function emitToolUpdate(live: LiveSession, runId: string, tool: AgentToolBlock): void {
+    emit({
+      ...live.key,
+      type: "tool_update",
+      runId,
+      tool: structuredClone(tool),
+      occurredAt: new Date().toISOString(),
+    });
   }
 
   async function resolveScope(scopeIdInput: string): Promise<{ scopeId: string; cwd: string }> {
@@ -168,6 +256,9 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       run: { status: "idle" },
       messages: [],
       assistantByTurn: new Map(),
+      modelId: thread.model ?? defaultModelId,
+      reasoningId: thread.reasoningEffort ?? selectedModel(models, thread.model ?? defaultModelId)?.defaultReasoningId,
+      fastMode: thread.serviceTier === "fast",
     };
     for (const turn of thread.turns ?? []) projectTurn(live, turn);
     sessions.set(agentScopeKeyId(key), live);
@@ -200,21 +291,22 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
     live.run = runFromTurn(turn);
   }
 
-  function upsertItem(live: LiveSession, turnId: string, item: CodexThreadItem, completed: boolean): void {
+  function upsertItem(live: LiveSession, turnId: string, item: CodexThreadItem, completed: boolean): AgentToolBlock | undefined {
     if (item.type === "userMessage") {
       const text = item.content?.map(userInputText).filter(Boolean).join("\n") ?? "";
       if (text && !live.messages.some((message) => message.id === item.id || message.id === item.clientId)) {
         appendUserMessage(live, item.id ?? `codex-user:${turnId}`, text);
       }
-      return;
+      return undefined;
     }
     const block = projectItem(item, completed);
-    if (!block) return;
+    if (!block) return undefined;
     const message = assistantMessage(live, turnId);
     const id = blockId(block);
     const index = message.blocks.findIndex((candidate) => blockId(candidate) === id);
     if (index < 0) message.blocks.push(block);
     else message.blocks[index] = block;
+    return block.type === "tool" ? block : undefined;
   }
 
   function onNotification(notification: CodexNotification): void {
@@ -241,8 +333,25 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       const turnId = stringField(params, "turnId");
       const item = params.item as CodexThreadItem | undefined;
       if (!turnId || !item?.type) return;
-      upsertItem(live, turnId, item, notification.method === "item/completed");
-      publish(live);
+      const tool = upsertItem(live, turnId, item, notification.method === "item/completed");
+      if (tool) emitToolUpdate(live, turnId, tool);
+      else publish(live);
+      return;
+    }
+    if (notification.method === "item/commandExecution/outputDelta") {
+      const turnId = stringField(params, "turnId");
+      const itemId = stringField(params, "itemId");
+      const delta = stringField(params, "delta");
+      if (!turnId || !itemId || delta === undefined) return;
+      const message = assistantMessage(live, turnId);
+      const existing = message.blocks.find((block) => block.type === "tool" && block.id === itemId);
+      const tool = existing?.type === "tool"
+        ? { ...existing, output: bounded((existing.output ?? "") + delta) }
+        : toolBlock(itemId, "Command", "command", "running", undefined, delta);
+      const index = message.blocks.findIndex((block) => block.type === "tool" && block.id === itemId);
+      if (index < 0) message.blocks.push(tool);
+      else message.blocks[index] = tool;
+      emitToolUpdate(live, turnId, tool);
       return;
     }
     if (notification.method === "item/agentMessage/delta") {
@@ -252,15 +361,17 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       if (!turnId || !itemId || delta === undefined) return;
       const message = assistantMessage(live, turnId);
       const existing = message.blocks.find((block) => block.type === "text" && block.id === itemId);
-      if (existing?.type === "text") existing.text += delta;
-      else message.blocks.push({ type: "text", id: itemId, text: delta });
-      publish(live);
+      const boundedDelta = bounded(delta);
+      if (existing?.type === "text") existing.text = bounded(existing.text + boundedDelta);
+      else message.blocks.push({ type: "text", id: itemId, text: boundedDelta });
+      emit({ ...live.key, type: "text_delta", runId: turnId, delta: boundedDelta, occurredAt: new Date().toISOString() });
       return;
     }
     if (notification.method === "turn/completed") {
       const turn = params.turn as CodexTurn | undefined;
       if (!turn?.id) return;
       cancelInteractions(live);
+      cancelDynamicTools(live);
       projectTurn(live, turn);
       const occurredAt = new Date().toISOString();
       if (live.run.status === "failed") {
@@ -282,6 +393,9 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
     const threadId = stringField(params, "threadId") ?? stringField(params, "conversationId");
     const live = threadId ? sessionsById.get(threadId) : undefined;
     if (!live) throw new Error("The Codex server request does not belong to an open session.");
+    if (serverRequest.method === "item/tool/call") {
+      return executeDynamicTool(live, params);
+    }
     const requestId = interactionId(serverRequest.id);
     const request = projectInteraction(requestId, serverRequest.method, params);
     if (!request) throw new Error(`Unsupported Codex server request: ${serverRequest.method}.`);
@@ -296,6 +410,41 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
         request,
       });
     });
+  }
+
+  async function executeDynamicTool(
+    live: LiveSession,
+    params: Record<string, unknown>,
+  ): Promise<{ contentItems: Array<{ type: "inputText"; text: string }>; success: boolean }> {
+    const callId = stringField(params, "callId");
+    const turnId = stringField(params, "turnId");
+    const toolName = stringField(params, "tool");
+    const tool = toolName ? dynamicToolByName.get(toolName) : undefined;
+    const pendingKey = callId ? JSON.stringify([live.key.sessionId, callId]) : "";
+    if (!callId || !turnId || !tool || pendingDynamicTools.has(pendingKey)) {
+      return dynamicToolResponse(false, "Pho Code rejected an unknown or duplicate dynamic tool call.");
+    }
+    if (live.run.runId && live.run.runId !== turnId) {
+      return dynamicToolResponse(false, "Pho Code rejected a dynamic tool call for a stale turn.");
+    }
+    const controller = new AbortController();
+    pendingDynamicTools.set(pendingKey, { live, controller });
+    try {
+      const output = await tool.execute({
+        scopeId: live.key.scopeId,
+        sessionId: live.key.sessionId,
+        turnId,
+        callId,
+        arguments: params.arguments,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return dynamicToolResponse(false, "Pho Code cancelled the dynamic tool call.");
+      return dynamicToolResponse(true, output);
+    } catch (error) {
+      return dynamicToolResponse(false, error instanceof Error ? error.message : "The Pho Code tool failed.");
+    } finally {
+      pendingDynamicTools.delete(pendingKey);
+    }
   }
 
   function settleInteraction(pending: PendingCodexInteraction, response: unknown): void {
@@ -316,6 +465,12 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
     }
   }
 
+  function cancelDynamicTools(live?: LiveSession): void {
+    for (const pending of pendingDynamicTools.values()) {
+      if (!live || pending.live === live) pending.controller.abort();
+    }
+  }
+
   const unsubscribe = connection.subscribe(onNotification);
   const stopRequests = connection.setRequestHandler(onServerRequest);
 
@@ -332,6 +487,8 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
         cwd,
         approvalPolicy: "on-request",
         sandbox: "workspace-write",
+        ...(options.developerInstructions ? { developerInstructions: bounded(options.developerInstructions) } : {}),
+        ...(dynamicTools.length > 0 ? { dynamicTools: dynamicTools.map(dynamicToolSpec) } : {}),
         ...(options.model ? { model: options.model } : {}),
       }) as CodexThreadResponse;
       return publish(register(scopeId, response.thread));
@@ -345,8 +502,45 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
         cwd,
         approvalPolicy: "on-request",
         sandbox: "workspace-write",
+        ...(options.developerInstructions ? { developerInstructions: bounded(options.developerInstructions) } : {}),
       }) as CodexThreadResponse;
       return publish(register(key.scopeId, response.thread));
+    },
+    async setModel(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") {
+        throw new Error("Wait for the current run to finish before changing the model.");
+      }
+      if (!models.some((model) => model.id === input.modelId)) {
+        throw new Error(`Codex model ${input.modelId} is not available.`);
+      }
+      live.modelId = input.modelId;
+      const model = selectedModel(models, input.modelId);
+      live.reasoningId = model?.defaultReasoningId;
+      live.fastMode = false;
+      return publish(live);
+    },
+    async setReasoning(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") throw new Error("Wait for the current run to finish before changing reasoning.");
+      const model = selectedModel(models, live.modelId);
+      if (!model?.reasoning.some((option) => option.id === input.reasoningId)) {
+        throw new Error(`Codex reasoning level ${input.reasoningId} is not available.`);
+      }
+      live.reasoningId = input.reasoningId;
+      return publish(live);
+    },
+    async setFastMode(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") throw new Error("Wait for the current run to finish before changing Fast mode.");
+      if (!selectedModel(models, live.modelId)?.serviceTiers.some((tier) => tier.id === "fast")) {
+        throw new Error("Fast mode is not available for the selected Codex model.");
+      }
+      live.fastMode = input.enabled;
+      return publish(live);
     },
     async sendPrompt(input) {
       requireAvailable();
@@ -355,6 +549,9 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       appendUserMessage(live, clientId, input.text);
       const response = await connection.request("turn/start", {
         threadId: live.key.sessionId,
+        ...(live.modelId ? { model: live.modelId } : {}),
+        ...(live.reasoningId ? { effort: live.reasoningId } : {}),
+        serviceTier: live.fastMode ? "fast" : null,
         clientUserMessageId: clientId,
         input: [{ type: "text", text: input.text, text_elements: [] }],
       }) as CodexTurnResponse;
@@ -376,6 +573,7 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       requireAvailable();
       const live = requireSession(input);
       cancelInteractions(live);
+      cancelDynamicTools(live);
       await connection.request("turn/interrupt", { threadId: live.key.sessionId, turnId: input.runId });
     },
     async resolveInteraction(input) {
@@ -396,6 +594,7 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
       unsubscribe();
       stopRequests();
       cancelInteractions();
+      cancelDynamicTools();
       listeners.clear();
       sessions.clear();
       sessionsById.clear();
@@ -404,30 +603,144 @@ export async function createCodexBackend(options: CreateCodexBackendOptions): Pr
   };
 }
 
+interface DiscoveredCodexModel extends AgentModelOption {
+  isDefault?: boolean;
+  reasoning: Array<{ id: string; label: string; description?: string }>;
+  defaultReasoningId?: string;
+  serviceTiers: Array<{ id: string; name?: string; description?: string }>;
+}
+
+async function discoverModels(
+  connection: CodexAppServerConnection,
+  configuredModel?: string,
+): Promise<DiscoveredCodexModel[]> {
+  const discovered: DiscoveredCodexModel[] = [];
+  let cursor: string | undefined;
+  try {
+    for (let page = 0; page < 5; page += 1) {
+      const response = await connection.request("model/list", {
+        limit: 100,
+        includeHidden: false,
+        ...(cursor ? { cursor } : {}),
+      }) as CodexModelListResponse;
+      for (const model of response.data ?? []) {
+        const id = model.model ?? model.id;
+        if (!id || id.length > 512 || discovered.some((candidate) => candidate.id === id)) continue;
+        discovered.push({
+          id,
+          label: boundedField(model.displayName ?? id, 200),
+          ...(model.description ? { description: boundedField(model.description, 1_000) } : {}),
+          supportsImages: model.inputModalities?.includes("image") ?? true,
+          ...(model.isDefault ? { isDefault: true } : {}),
+          reasoning: (model.supportedReasoningEfforts ?? []).map((effort) => ({
+            id: effort.reasoningEffort,
+            label: reasoningLabel(effort.reasoningEffort),
+            ...(effort.description ? { description: boundedField(effort.description, 1_000) } : {}),
+          })),
+          ...(model.defaultReasoningEffort ? { defaultReasoningId: model.defaultReasoningEffort } : {}),
+          serviceTiers: (model.serviceTiers ?? []).map((tier) => ({
+            id: tier.id,
+            ...(tier.name ? { name: boundedField(tier.name, 200) } : {}),
+            ...(tier.description ? { description: boundedField(tier.description, 1_000) } : {}),
+          })),
+        });
+      }
+      cursor = response.nextCursor ?? undefined;
+      if (!cursor) break;
+    }
+  } catch {
+    // Older compatible app-server versions may not expose model/list.
+  }
+  if (configuredModel && !discovered.some((model) => model.id === configuredModel)) {
+    discovered.unshift({ id: configuredModel, label: configuredModel, reasoning: [], serviceTiers: [] });
+  }
+  return discovered;
+}
+
 function projectItem(item: CodexThreadItem, completed: boolean): AgentTranscriptBlock | undefined {
   const id = item.id ?? `${item.type}:unknown`;
   if (item.type === "agentMessage") return { type: "text", id, text: item.text ?? "" };
   if (item.type === "commandExecution") {
-    return tool(id, "Command", "command", completedStatus(item.status, completed), item.command, item.aggregatedOutput ?? undefined);
+    return toolBlock(id, "Command", "command", completedStatus(item.status, completed), item.command, item.aggregatedOutput ?? undefined);
   }
   if (item.type === "fileChange") {
-    return tool(id, "File changes", "file-change", completedStatus(item.status, completed), json(item.changes));
+    return toolBlock(id, "File changes", "file-change", completedStatus(item.status, completed), json(item.changes));
   }
   if (item.type === "mcpToolCall") {
-    return tool(id, `${item.server ?? "MCP"}: ${item.tool ?? "tool"}`, "mcp", completedStatus(item.status, completed), json(item.arguments), json(item.error ?? item.result));
+    return toolBlock(id, `${item.server ?? "MCP"}: ${item.tool ?? "tool"}`, "mcp", completedStatus(item.status, completed), json(item.arguments), json(item.error ?? item.result));
+  }
+  if (item.type === "dynamicToolCall") {
+    const output = item.contentItems?.map(dynamicToolContentText).filter(Boolean).join("\n");
+    return toolBlock(
+      id,
+      `Pho Code: ${item.tool ?? "tool"}`,
+      "other",
+      item.success === false ? "failed" : completedStatus(item.status, completed),
+      json(item.arguments),
+      output || undefined,
+    );
   }
   if (item.type === "webSearch") {
-    return tool(id, "Web search", "web-search", completed ? "completed" : "running", item.query, json(item.results));
+    return toolBlock(id, "Web search", "web-search", completed ? "completed" : "running", item.query, json(item.results));
   }
-  if (item.type === "imageView") return tool(id, "View image", "image", completed ? "completed" : "running", item.path);
+  if (item.type === "imageView") return toolBlock(id, "View image", "image", completed ? "completed" : "running", item.path);
   if (item.type === "enteredReviewMode" || item.type === "exitedReviewMode") {
-    return tool(id, item.type === "enteredReviewMode" ? "Review started" : "Review completed", "review", "completed", item.review);
+    return toolBlock(id, item.type === "enteredReviewMode" ? "Review started" : "Review completed", "review", "completed", item.review);
   }
-  if (item.type === "contextCompaction") return tool(id, "Context compacted", "other", "completed");
+  if (item.type === "contextCompaction") return toolBlock(id, "Context compacted", "other", "completed");
   if (item.type === "collabAgentToolCall" || item.type === "subAgentActivity") {
-    return tool(id, "Subagent activity", "subagent", completedStatus(item.status, completed), item.prompt ?? undefined, json(item.receiverThreadIds));
+    return toolBlock(id, "Subagent activity", "subagent", completedStatus(item.status, completed), item.prompt ?? undefined, json(item.receiverThreadIds));
   }
   return undefined;
+}
+
+function normalizeDynamicTools(tools: readonly CodexDynamicTool[]): CodexDynamicTool[] {
+  const normalized: CodexDynamicTool[] = [];
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/u.test(tool.name) || names.has(tool.name)) {
+      throw new TypeError(`Invalid or duplicate Codex dynamic tool name: ${tool.name}.`);
+    }
+    if (tool.type !== "function" || !tool.description.trim() || typeof tool.execute !== "function") {
+      throw new TypeError(`Invalid Codex dynamic tool definition: ${tool.name}.`);
+    }
+    names.add(tool.name);
+    normalized.push(tool);
+  }
+  return normalized;
+}
+
+function dynamicToolSpec(tool: CodexDynamicTool): CodexDynamicToolSpec {
+  return {
+    type: "function",
+    name: tool.name,
+    description: boundedField(tool.description, 1_000),
+    inputSchema: tool.inputSchema,
+  };
+}
+
+function dynamicToolResponse(
+  success: boolean,
+  text: string,
+): { contentItems: Array<{ type: "inputText"; text: string }>; success: boolean } {
+  return { success, contentItems: [{ type: "inputText", text: bounded(text) }] };
+}
+
+function dynamicToolContentText(value: unknown): string {
+  const item = asRecord(value);
+  return item.type === "inputText" && typeof item.text === "string" ? item.text : "";
+}
+
+function selectedModel(
+  models: readonly DiscoveredCodexModel[],
+  modelId: string | undefined,
+): DiscoveredCodexModel | undefined {
+  return models.find((model) => model.id === modelId);
+}
+
+function reasoningLabel(id: string): string {
+  if (id === "xhigh") return "Extra high";
+  return id.length > 0 ? `${id[0]!.toUpperCase()}${id.slice(1)}` : id;
 }
 
 function projectInteraction(
@@ -594,16 +907,7 @@ function boundedField(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
-function requireTestedCodexVersion(userAgent: string | undefined): void {
-  const version = userAgent?.match(/\b(\d+\.\d+\.\d+)\b/u)?.[1];
-  if (version !== CODEX_APP_SERVER_TESTED_VERSION) {
-    throw new Error(
-      `Pho Code supports Codex app-server ${CODEX_APP_SERVER_TESTED_VERSION}; found ${version ?? "an unknown version"}.`,
-    );
-  }
-}
-
-function tool(
+function toolBlock(
   id: string,
   name: string,
   kind: AgentToolBlock["kind"],

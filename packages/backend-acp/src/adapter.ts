@@ -5,6 +5,8 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionConfigOption,
+  SessionConfigSelectOption,
   SessionUpdate,
   ToolCall,
   ToolCallUpdate,
@@ -17,6 +19,7 @@ import {
   type AgentBackendDescriptor,
   type AgentInteractionRequest,
   type AgentInteractionResolution,
+  type AgentModelState,
   type AgentRuntimeEvent,
   type AgentScopeKey,
   type AgentSessionSnapshot,
@@ -63,6 +66,21 @@ export function createLazyAcpBackend(options: CreateAcpBackendOptions): AgentBac
     getSessionSnapshot: async (key) => (await load()).getSessionSnapshot(key),
     createSession: async (scopeId) => (await load()).createSession(scopeId),
     openSession: async (key) => (await load()).openSession(key),
+    setModel: async (input) => {
+      const created = await load();
+      if (!created.setModel) throw new Error("The ACP backend does not support model selection.");
+      return created.setModel(input);
+    },
+    setReasoning: async (input) => {
+      const created = await load();
+      if (!created.setReasoning) throw new Error("The ACP backend does not support reasoning selection.");
+      return created.setReasoning(input);
+    },
+    setFastMode: async (input) => {
+      const created = await load();
+      if (!created.setFastMode) throw new Error("The ACP backend does not support Fast mode.");
+      return created.setFastMode(input);
+    },
     sendPrompt: async (input) => (await load()).sendPrompt(input),
     abortRun: async (input) => (await load()).abortRun(input),
     resolveInteraction: async (input) => {
@@ -91,6 +109,7 @@ interface LiveSession {
   run: AgentSessionSnapshot["run"];
   messages: AgentTranscriptMessage[];
   assistantByRun: Map<string, number>;
+  configOptions: SessionConfigOption[];
 }
 
 interface PendingAcpPermission {
@@ -128,7 +147,17 @@ export async function createAcpBackend(options: CreateAcpBackendOptions): Promis
   }
 
   function snapshot(live: LiveSession): AgentSessionSnapshot {
-    return { key: live.key, run: { ...live.run }, messages: structuredClone(live.messages) };
+    const model = projectModelState(live.configOptions);
+    const reasoning = projectReasoningState(live.configOptions);
+    const fastMode = projectFastMode(live.configOptions);
+    return {
+      key: live.key,
+      run: { ...live.run },
+      messages: structuredClone(live.messages),
+      ...(model ? { model } : {}),
+      ...(reasoning ? { reasoning } : {}),
+      ...(fastMode ? { fastMode } : {}),
+    };
   }
 
   function publish(live: LiveSession): AgentSessionSnapshot {
@@ -146,15 +175,19 @@ export async function createAcpBackend(options: CreateAcpBackendOptions): Promis
     return { scopeId, cwd: path.resolve(resolution.runtimeDirectory) };
   }
 
-  function register(keyInput: AgentScopeKey): LiveSession {
+  function register(keyInput: AgentScopeKey, configOptions: SessionConfigOption[]): LiveSession {
     const key = normalizeAgentScopeKey(keyInput);
     const existing = sessions.get(agentScopeKeyId(key));
-    if (existing) return existing;
+    if (existing) {
+      existing.configOptions = configOptions;
+      return existing;
+    }
     const live: LiveSession = {
       key,
       run: { status: "idle" },
       messages: [],
       assistantByRun: new Map(),
+      configOptions,
     };
     sessions.set(agentScopeKeyId(key), live);
     sessionsById.set(key.sessionId, live);
@@ -179,9 +212,29 @@ export async function createAcpBackend(options: CreateAcpBackendOptions): Promis
 
   function onUpdate(notification: SessionNotification): void {
     const live = sessionsById.get(notification.sessionId);
-    const runId = live?.run.runId;
-    if (!live || !runId) return;
-    projectUpdate(assistantMessage(live, runId), notification.update);
+    if (!live) return;
+    if (notification.update.sessionUpdate === "config_option_update") {
+      live.configOptions = notification.update.configOptions;
+      publish(live);
+      return;
+    }
+    const runId = live.run.runId;
+    if (!runId) return;
+    const tool = projectUpdate(assistantMessage(live, runId), notification.update);
+    if (notification.update.sessionUpdate === "agent_message_chunk" && notification.update.content.type === "text") {
+      emit({
+        ...live.key,
+        type: "text_delta",
+        runId,
+        delta: bounded(notification.update.content.text),
+        occurredAt: new Date().toISOString(),
+      });
+      return;
+    }
+    if (tool) {
+      emit({ ...live.key, type: "tool_update", runId, tool, occurredAt: new Date().toISOString() });
+      return;
+    }
     publish(live);
   }
 
@@ -235,21 +288,55 @@ export async function createAcpBackend(options: CreateAcpBackendOptions): Promis
     async createSession(scopeIdInput) {
       requireAvailable();
       const { scopeId, cwd } = await resolveScope(scopeIdInput);
-      const sessionId = await client.createSession(cwd);
-      return publish(register({ scopeId, sessionId }));
+      const session = await client.createSession(cwd);
+      return publish(register({ scopeId, sessionId: session.sessionId }, session.configOptions));
     },
     async openSession(keyInput) {
       requireAvailable();
       const key = normalizeAgentScopeKey(keyInput);
       const { cwd } = await resolveScope(key.scopeId);
-      const live = register(key);
-      try {
-        await client.openSession(key.sessionId, cwd);
-      } catch (error) {
-        sessions.delete(agentScopeKeyId(key));
-        sessionsById.delete(key.sessionId);
-        throw error;
+      const configOptions = await client.openSession(key.sessionId, cwd);
+      return publish(register(key, configOptions));
+    },
+    async setModel(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") {
+        throw new Error("Wait for the current run to finish before changing the model.");
       }
+      const config = modelConfig(live.configOptions);
+      if (!config || !modelOptions(config).some((option) => option.value === input.modelId)) {
+        throw new Error(`ACP model ${input.modelId} is not available.`);
+      }
+      live.configOptions = await client.setSessionConfigOption(
+        live.key.sessionId,
+        config.id,
+        input.modelId,
+      );
+      return publish(live);
+    },
+    async setReasoning(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") throw new Error("Wait for the current run to finish before changing reasoning.");
+      const config = reasoningConfig(live.configOptions);
+      if (!config || !modelOptions(config).some((option) => option.value === input.reasoningId)) {
+        throw new Error(`ACP reasoning level ${input.reasoningId} is not available.`);
+      }
+      live.configOptions = await client.setSessionConfigOption(live.key.sessionId, config.id, input.reasoningId);
+      return publish(live);
+    },
+    async setFastMode(input) {
+      requireAvailable();
+      const live = requireSession(input);
+      if (live.run.status === "running") throw new Error("Wait for the current run to finish before changing Fast mode.");
+      const config = fastConfig(live.configOptions);
+      if (!config) throw new Error("Fast mode is not available for this ACP session.");
+      const value = input.enabled ? "on" : "off";
+      if (!modelOptions(config).some((option) => option.value === value)) {
+        throw new Error(`ACP Fast mode cannot be turned ${value}.`);
+      }
+      live.configOptions = await client.setSessionConfigOption(live.key.sessionId, config.id, value);
       return publish(live);
     },
     async sendPrompt(input) {
@@ -357,6 +444,9 @@ function acpDescriptor(id: string, label: string, capabilities?: AgentCapabiliti
     id: requireAgentId(id, "backendId"),
     label: requireAgentId(label, "backend label"),
     capabilities: {
+      "model-selection": "experimental",
+      "reasoning-selection": "experimental",
+      "fast-mode": "experimental",
       plans: "experimental",
       approvals: "native",
       ...(capabilities?.promptCapabilities?.image ? { images: "native" as const } : {}),
@@ -366,30 +456,88 @@ function acpDescriptor(id: string, label: string, capabilities?: AgentCapabiliti
   };
 }
 
-function projectUpdate(message: AgentTranscriptMessage, update: SessionUpdate): void {
+function modelConfig(configOptions: SessionConfigOption[]): Extract<SessionConfigOption, { type: "select" }> | undefined {
+  return configOptions.find(
+    (option): option is Extract<SessionConfigOption, { type: "select" }> =>
+      option.type === "select" && option.category === "model",
+  );
+}
+
+function reasoningConfig(configOptions: SessionConfigOption[]): Extract<SessionConfigOption, { type: "select" }> | undefined {
+  return configOptions.find(
+    (option): option is Extract<SessionConfigOption, { type: "select" }> =>
+      option.type === "select" && option.category === "thought_level",
+  );
+}
+
+function fastConfig(configOptions: SessionConfigOption[]): Extract<SessionConfigOption, { type: "select" }> | undefined {
+  return configOptions.find(
+    (option): option is Extract<SessionConfigOption, { type: "select" }> =>
+      option.type === "select" && option.id === "fast",
+  );
+}
+
+function modelOptions(config: Extract<SessionConfigOption, { type: "select" }>): SessionConfigSelectOption[] {
+  return config.options.flatMap((option) => "value" in option ? [option] : option.options);
+}
+
+function projectModelState(configOptions: SessionConfigOption[]): AgentModelState | undefined {
+  const config = modelConfig(configOptions);
+  if (!config) return undefined;
+  return {
+    currentId: config.currentValue,
+    available: modelOptions(config).map((option) => ({
+      id: option.value,
+      label: option.name,
+      ...(option.description ? { description: option.description } : {}),
+    })),
+  };
+}
+
+function projectReasoningState(configOptions: SessionConfigOption[]): AgentSessionSnapshot["reasoning"] {
+  const config = reasoningConfig(configOptions);
+  if (!config) return undefined;
+  return {
+    currentId: config.currentValue,
+    available: modelOptions(config).map((option) => ({
+      id: option.value,
+      label: option.name,
+      ...(option.description ? { description: option.description } : {}),
+    })),
+  };
+}
+
+function projectFastMode(configOptions: SessionConfigOption[]): AgentSessionSnapshot["fastMode"] {
+  const config = fastConfig(configOptions);
+  if (!config) return undefined;
+  return {
+    enabled: config.currentValue === "on",
+    ...(config.description ? { description: config.description } : {}),
+  };
+}
+
+function projectUpdate(message: AgentTranscriptMessage, update: SessionUpdate): AgentToolBlock | undefined {
   if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
     const id = update.messageId ?? "agent-message";
     const existing = message.blocks.find((block) => block.type === "text" && block.id === id);
     if (existing?.type === "text") existing.text = bounded(existing.text + update.content.text);
     else message.blocks.push({ type: "text", id, text: bounded(update.content.text) });
-    return;
+    return undefined;
   }
   if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-    upsertTool(message, update);
-    return;
+    return upsertTool(message, update);
   }
   if (update.sessionUpdate === "plan" || update.sessionUpdate === "plan_update") {
-    upsertTool(message, {
+    return upsertTool(message, {
       toolCallId: "acp-plan",
       title: "Plan",
       kind: "think",
       status: "completed",
       rawOutput: update,
     });
-    return;
   }
   if (update.sessionUpdate === "compaction_update" || update.sessionUpdate === "compaction_summary_chunk") {
-    upsertTool(message, {
+    return upsertTool(message, {
       toolCallId: "acp-compaction",
       title: "Context compaction",
       kind: "think",
@@ -397,16 +545,20 @@ function projectUpdate(message: AgentTranscriptMessage, update: SessionUpdate): 
       rawOutput: update,
     });
   }
+  return undefined;
 }
 
-function upsertTool(message: AgentTranscriptMessage, update: ToolCall | ToolCallUpdate): void {
+function upsertTool(message: AgentTranscriptMessage, update: ToolCall | ToolCallUpdate): AgentToolBlock {
   const index = message.blocks.findIndex((block) => block.type === "tool" && block.id === update.toolCallId);
   const existing = index >= 0 ? message.blocks[index] : undefined;
   const prior = existing?.type === "tool" ? existing : undefined;
   const title = update.title ?? prior?.title;
   const kind = acpToolKind(update.kind) ?? prior?.kind;
   const input = json(update.rawInput) ?? prior?.input;
-  const output = json(update.rawOutput) ?? prior?.output;
+  const outputDelta = terminalOutputDelta(update);
+  const output = outputDelta !== undefined
+    ? bounded((prior?.output ?? "") + outputDelta)
+    : json(update.rawOutput) ?? prior?.output;
   const block: AgentToolBlock = {
     type: "tool",
     id: update.toolCallId,
@@ -419,6 +571,16 @@ function upsertTool(message: AgentTranscriptMessage, update: ToolCall | ToolCall
   };
   if (index < 0) message.blocks.push(block);
   else message.blocks[index] = block;
+  return block;
+}
+
+function terminalOutputDelta(update: ToolCall | ToolCallUpdate): string | undefined {
+  const meta = update._meta;
+  if (!meta || typeof meta !== "object") return undefined;
+  const terminalOutput = (meta as Record<string, unknown>).terminal_output;
+  if (!terminalOutput || typeof terminalOutput !== "object") return undefined;
+  const data = (terminalOutput as Record<string, unknown>).data;
+  return typeof data === "string" ? data : undefined;
 }
 
 function acpToolKind(kind: ToolCall["kind"] | null | undefined): AgentToolBlock["kind"] | undefined {

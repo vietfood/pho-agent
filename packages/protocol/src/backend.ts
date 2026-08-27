@@ -6,11 +6,18 @@ import {
 import type {
   AgentPromptAdmission,
   AgentQueueAdmission,
+  AgentSetModelInput,
+  AgentSetFastModeInput,
+  AgentSetReasoningInput,
   AgentSessionSnapshot,
+  AgentToolBlock,
 } from "./session";
 import type { AgentInteractionRequest, AgentInteractionResolution } from "./interaction";
 
 export const AGENT_BACKEND_CAPABILITIES = [
+  "model-selection",
+  "reasoning-selection",
+  "fast-mode",
   "steering",
   "queued-follow-up",
   "images",
@@ -23,6 +30,7 @@ export const AGENT_BACKEND_CAPABILITIES = [
   "subagents",
   "skills",
   "mcp",
+  "dynamic-tools",
   "structured-file-changes",
 ] as const;
 
@@ -62,6 +70,15 @@ export interface AgentBackendAbortInput extends AgentBackendScopeKey {
   runId: string;
 }
 
+export type AgentBackendSetModelInput = Omit<AgentSetModelInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendSetReasoningInput = Omit<AgentSetReasoningInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendSetFastModeInput = Omit<AgentSetFastModeInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
 export type AgentBackendInteractionResolution = AgentBackendScopeKey & AgentInteractionResolution;
 
 export type AgentBackendPromptAdmission = Omit<AgentPromptAdmission, keyof AgentScopeKey> &
@@ -75,6 +92,18 @@ export type AgentBackendEvent =
       type: "session_snapshot";
       occurredAt: string;
       snapshot: AgentBackendSessionSnapshot;
+    })
+  | (AgentBackendScopeKey & {
+      type: "text_delta";
+      occurredAt: string;
+      runId: string;
+      delta: string;
+    })
+  | (AgentBackendScopeKey & {
+      type: "tool_update";
+      occurredAt: string;
+      runId: string;
+      tool: AgentToolBlock;
     })
   | (AgentBackendScopeKey & {
       type: "run_started" | "run_settled" | "run_cancelled";
