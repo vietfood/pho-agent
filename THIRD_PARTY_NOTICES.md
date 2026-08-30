@@ -4,8 +4,8 @@ Pho Agent is MIT licensed. Its runtime also depends on third-party packages unde
 
 ## earendil-works/pi
 
-- Source: <https://github.com/earendil-works/pi/tree/v0.84.1>
-- Version: `0.84.1`
+- Source: <https://github.com/earendil-works/pi/tree/v0.84.4>
+- Version: `0.84.4`
 - License: MIT
 - Use: Pi SDK runtime and tool/extension interfaces. The `todo` feature adapts the example extension's idea of reconstructing state from current-branch tool-result details; its input and host behavior are Pho Agent-owned.
 

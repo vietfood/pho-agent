@@ -19,6 +19,6 @@ bun run lint
 bun test
 ```
 
-The runtime pins Pi SDK `0.84.1`. Consumers should include `packages/*` from this repository in their workspace and depend on the required `@pho-agent/*` packages with `workspace:*`. When consumed as a Git submodule, the parent repository owns the exact gitlink revision.
+The runtime pins Pi SDK `0.84.4`. Consumers should include `packages/*` from this repository in their workspace and depend on the required `@pho-agent/*` packages with `workspace:*`. When consumed as a Git submodule, the parent repository owns the exact gitlink revision.
 
 Pho Agent provides harness mechanics, not product policy. Consumers retain their own identity mapping, data roots, resource selection, credential/UI policy, filesystem authority, and application-specific tools.
