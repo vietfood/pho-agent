@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./compaction-controller": "./src/compaction-controller.ts",
+    "./context-continuity-feature": "./src/context-continuity-feature.ts",
     "./context-prompt-feature": "./src/context-prompt-feature.ts",
+    "./display-transcript": "./src/display-transcript.ts",
     "./feature-api": "./src/feature-api.ts",
     "./github-mcp": "./src/github-mcp/index.ts",
     "./path-containment": "./src/path-containment.ts",

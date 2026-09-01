@@ -1,4 +1,5 @@
 export * from "./backend";
+export * from "./compaction";
 export * from "./events";
 export * from "./errors";
 export * from "./github-mcp";
