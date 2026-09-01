@@ -28,6 +28,8 @@ const registered = [
   TODO_TOOL_NAME,
   EXECUTE_PLAN_TOOL_NAME,
   "web_search",
+  "update_task_brief",
+  "complete_task",
   "cursor_ask_question",
 ];
 
@@ -42,6 +44,8 @@ describe("plan-agent tool intersection", () => {
     expect(names).toContain("read");
     expect(names).toContain("bash");
     expect(names).toContain("web_search");
+    expect(names).toContain("update_task_brief");
+    expect(names).toContain("complete_task");
     expect(names).toContain(ASK_USER_QUESTION_TOOL_NAME);
     expect(names).toContain(UPDATE_PLAN_DOCUMENT_TOOL_NAME);
     expect(names).toContain(TODO_TOOL_NAME);

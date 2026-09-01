@@ -56,6 +56,20 @@ describe("headless non-code consumer", () => {
     ]);
     const stop = first.subscribe((event) => events.push(event));
     const created = await first.createSession({ backendId: "pi", scopeId: "memory:case-1" });
+    expect(created.task).toEqual({ verification: { records: [], truncated: false } });
+    const briefed = await first.updateTaskBrief({
+      ...created.key,
+      content: {
+        objective: "Prove product-neutral task state",
+        constraints: [],
+        acceptanceCriteria: [{ id: "restore", text: "The brief restores in an opaque scope" }],
+        assumptions: [],
+        openQuestions: [],
+        nonGoals: [],
+      },
+      status: "active",
+    });
+    expect(briefed.task?.brief).toMatchObject({ updatedBy: "owner", status: "active" });
     const admission = await first.sendPrompt({ ...created.key, text: "hello" });
     expect(admission.admitted).toBe(true);
     await waitFor(events, "run_settled");
@@ -77,6 +91,11 @@ describe("headless non-code consumer", () => {
       expect(await listProductAgentSessions(product, agentDir, "memory:case-1")).toContain(created.key.sessionId);
       const reopened = await second.openSession(created.key);
       expect(reopened.messages.some((message) => message.role === "assistant")).toBe(true);
+      expect(reopened.task?.brief).toMatchObject({
+        objective: "Prove product-neutral task state",
+        status: "active",
+      });
+      expect(reopened.task?.evidence?.items[0]?.providerId).toBe("task-brief");
     } finally {
       await second.dispose();
     }

@@ -12,7 +12,8 @@
     "./github-mcp": "./src/github-mcp.ts",
     "./json": "./src/json.ts",
     "./plan-agent": "./src/plan-agent.ts",
-    "./skills": "./src/skills.ts"
+    "./skills": "./src/skills.ts",
+    "./task": "./src/task.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -8,6 +8,7 @@ export const PI_BACKEND_DESCRIPTOR: AgentBackendDescriptor = {
   capabilities: {
     steering: "native",
     "queued-follow-up": "native",
+    "task-intelligence": "native",
   },
 };
 

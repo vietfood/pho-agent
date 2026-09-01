@@ -2,19 +2,28 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   agentScopeKeyId,
+  boundedTaskText,
   normalizeAgentScopeKey,
   requireAgentId,
   type AgentAbortInput,
+  type AgentAcceptTaskCompletionGapsInput,
   type AgentFollowUpInput,
   type AgentPromptAdmission,
   type AgentPromptInput,
   type AgentQueueAdmission,
+  type AgentRecordOwnerVerificationInput,
+  type AgentReopenTaskInput,
+  type AgentResetTaskBriefInput,
   type AgentRuntimeEvent,
   type AgentScopeKey,
   type AgentSessionSnapshot,
   type AgentSteerInput,
+  type AgentUpdateTaskBriefInput,
   type AgentTranscriptBlock,
   type AgentTranscriptMessage,
+  type EvidenceCandidate,
+  type TaskBriefSnapshot,
+  type VerificationRecord,
   type Unsubscribe,
 } from "@pho-agent/protocol";
 import type { AgentScopeAdapter } from "@pho-agent/host";
@@ -31,16 +40,54 @@ import {
   type AgentManagedSession,
 } from "./pi-services";
 import { flattenAgentFeatures, type AgentFeature } from "./features";
+import { createTaskFeature } from "./task-feature";
+import {
+  acceptCompletionGaps,
+  appendCompletionAssessment,
+  appendTaskBrief,
+  appendVerificationRecord,
+  projectAgentTask,
+  reopenTaskBrief,
+  resetTaskBrief,
+} from "./task-state";
 
 export type { AgentScopeAdapter, AgentScopeResolution } from "@pho-agent/host";
 
 export interface EvidenceProvider {
   id: string;
+  collect(request: EvidenceRequest): Promise<readonly EvidenceCandidate[]>;
+}
+
+export interface EvidenceRequest {
+  key: AgentScopeKey;
+  runId: string;
+  prompt: string;
+  taskBrief?: TaskBriefSnapshot;
+  signal: AbortSignal;
 }
 
 export interface VerificationAdapter {
   id: string;
+  record(input: VerificationAdapterInput): VerificationRecordCandidate | undefined;
 }
+
+export interface VerificationAdapterInput {
+  key: AgentScopeKey;
+  runId: string;
+  tool: {
+    toolCallId: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    content: readonly unknown[];
+    details: unknown;
+    isError: boolean;
+  };
+}
+
+export type VerificationRecordCandidate = Omit<
+  VerificationRecord,
+  "id" | "sourceAdapterId" | "sourceEntryId" | "sourceCallId" | "observedAt"
+>;
 
 export interface AgentProductAdapter {
   id: string;
@@ -58,6 +105,11 @@ export interface AgentRuntime {
   steerRun(input: AgentSteerInput): Promise<AgentQueueAdmission>;
   queueFollowUp(input: AgentFollowUpInput): Promise<AgentQueueAdmission>;
   abortRun(input: AgentAbortInput): Promise<void>;
+  updateTaskBrief(input: AgentUpdateTaskBriefInput): Promise<AgentSessionSnapshot>;
+  resetTaskBrief(input: AgentResetTaskBriefInput): Promise<AgentSessionSnapshot>;
+  reopenTask(input: AgentReopenTaskInput): Promise<AgentSessionSnapshot>;
+  recordOwnerVerification(input: AgentRecordOwnerVerificationInput): Promise<AgentSessionSnapshot>;
+  acceptTaskCompletionGaps(input: AgentAcceptTaskCompletionGapsInput): Promise<AgentSessionSnapshot>;
   subscribe(listener: (event: AgentRuntimeEvent) => void): Unsubscribe;
   dispose(): Promise<void>;
 }
@@ -83,7 +135,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (options.testProvider) {
     registerAgentTestProvider(modelRuntime, options.testProvider);
   }
-  const featureResources = flattenAgentFeatures(options.product.features);
+  const sessions = new Map<string, LiveAgentSession>();
+  const listeners = new Set<(event: AgentRuntimeEvent) => void>();
+  const taskFeature = createTaskFeature({
+    evidenceProviders: options.product.evidenceProviders,
+    verificationAdapters: options.product.verificationAdapters,
+    resolveRun({ sessionId }) {
+      const live = [...sessions.values()].find((candidate) => candidate.key.sessionId === sessionId);
+      return live?.run ? { key: live.key, runId: live.run.id } : undefined;
+    },
+    onChanged(key) {
+      const live = sessions.get(agentScopeKeyId(key));
+      if (live) publishSnapshot(live);
+    },
+  });
+  const featureResources = flattenAgentFeatures([...options.product.features, taskFeature]);
   const factory = createPiSessionRuntimeFactory({
     modelRuntime,
     ...(options.testProvider
@@ -115,8 +181,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         : {}),
     }),
   });
-  const sessions = new Map<string, LiveAgentSession>();
-  const listeners = new Set<(event: AgentRuntimeEvent) => void>();
   let disposed = false;
 
   function emit(event: AgentRuntimeEvent): void {
@@ -132,6 +196,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         ? { status: live.run.cancelled ? "cancelled" : "running", runId: live.run.id }
         : { status: "idle" },
       messages: projectMessages(live.runtime.session.messages),
+      task: projectAgentTask(live.runtime.session.sessionManager.getBranch(), live.key),
     };
   }
 
@@ -289,6 +354,67 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       live.runtime.session.clearQueue();
       await live.runtime.session.abort();
     },
+    async updateTaskBrief(input) {
+      assertAvailable();
+      const live = await open(input);
+      requireIdle(live, "updateTaskBrief");
+      appendTaskBrief(taskStore(live), live.key, input.content, {
+        id: randomUUID,
+        now: () => new Date().toISOString(),
+        updatedBy: "owner",
+        status: input.status ?? "active",
+        ...(input.expectedRevision ? { expectedRevision: input.expectedRevision } : {}),
+      });
+      return publishSnapshot(live);
+    },
+    async resetTaskBrief(input) {
+      assertAvailable();
+      const live = await open(input);
+      requireIdle(live, "resetTaskBrief");
+      resetTaskBrief(taskStore(live), live.key, input.expectedRevision);
+      return publishSnapshot(live);
+    },
+    async reopenTask(input) {
+      assertAvailable();
+      const live = await open(input);
+      requireIdle(live, "reopenTask");
+      reopenTaskBrief(taskStore(live), live.key, {
+        id: randomUUID,
+        now: () => new Date().toISOString(),
+      });
+      return publishSnapshot(live);
+    },
+    async recordOwnerVerification(input) {
+      assertAvailable();
+      const live = await open(input);
+      requireIdle(live, "recordOwnerVerification");
+      const task = projectAgentTask(live.runtime.session.sessionManager.getBranch(), live.key);
+      if (input.criterionId && !task.brief?.acceptanceCriteria.some((criterion) => criterion.id === input.criterionId)) {
+        throw new Error("Owner verification references an unknown Task Brief criterion.");
+      }
+      appendVerificationRecord(taskStore(live), live.key, {
+        id: randomUUID(),
+        sourceAdapterId: "owner",
+        ...(input.criterionId ? { criterionId: input.criterionId } : {}),
+        outcome: input.outcome,
+        summary: boundedTaskText(input.summary, "Owner verification summary"),
+        freshness: "current",
+        observedAt: new Date().toISOString(),
+      });
+      return publishSnapshot(live);
+    },
+    async acceptTaskCompletionGaps(input) {
+      assertAvailable();
+      const live = await open(input);
+      requireIdle(live, "acceptTaskCompletionGaps");
+      const task = projectAgentTask(live.runtime.session.sessionManager.getBranch(), live.key);
+      appendCompletionAssessment(
+        taskStore(live),
+        live.key,
+        acceptCompletionGaps(task.completion, new Date().toISOString()),
+      );
+      return publishSnapshot(live);
+    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -310,6 +436,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       listeners.clear();
     },
   };
+
+  function requireIdle(live: LiveAgentSession, operation: string): void {
+    if (live.run) throw new Error(`${operation} is available only while the session is idle.`);
+  }
+
+  function taskStore(live: LiveAgentSession) {
+    return live.runtime.session.sessionManager;
+  }
 }
 
 export async function listProductAgentSessions(

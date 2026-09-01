@@ -5,5 +5,8 @@ export * from "./features";
 export * from "./pi-backend";
 export * from "./pi-services";
 export * from "./runtime";
+export * from "./task-evidence";
+export * from "./task-feature";
+export * from "./task-state";
 export { generateSessionTitle } from "./session-title";
 export { getAgentDir } from "./feature-api";

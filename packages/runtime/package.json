@@ -18,7 +18,9 @@
     "./plan-agent": "./src/plan-agent/index.ts",
     "./session-registry": "./src/session-registry.ts",
     "./skills": "./src/skills/index.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./task-feature": "./src/task-feature.ts",
+    "./task-state": "./src/task-state.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",

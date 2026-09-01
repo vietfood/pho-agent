@@ -1,5 +1,6 @@
-import type { AgentApprovalSessionState } from "./approval";
 import type { AgentScopeKey } from "./identity";
+import type { AgentApprovalSessionState } from "./approval";
+import type { AgentTaskSnapshot } from "./task";
 
 export type AgentRunStatus = "idle" | "running" | "settled" | "failed" | "cancelled";
 
@@ -78,6 +79,7 @@ export interface AgentSessionSnapshot {
   reasoning?: AgentReasoningState;
   fastMode?: AgentFastModeState;
   approval?: AgentApprovalSessionState;
+  task?: AgentTaskSnapshot;
 }
 
 export interface AgentSetModelInput extends AgentScopeKey {

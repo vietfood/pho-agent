@@ -13,6 +13,13 @@ import type {
   AgentToolBlock,
 } from "./session";
 import type { AgentInteractionRequest, AgentInteractionResolution } from "./interaction";
+import type {
+  AgentAcceptTaskCompletionGapsInput,
+  AgentRecordOwnerVerificationInput,
+  AgentReopenTaskInput,
+  AgentResetTaskBriefInput,
+  AgentUpdateTaskBriefInput,
+} from "./task";
 
 export const AGENT_BACKEND_CAPABILITIES = [
   "model-selection",
@@ -32,6 +39,7 @@ export const AGENT_BACKEND_CAPABILITIES = [
   "mcp",
   "dynamic-tools",
   "structured-file-changes",
+  "task-intelligence",
 ] as const;
 
 export type AgentBackendCapability = (typeof AGENT_BACKEND_CAPABILITIES)[number];
@@ -77,6 +85,21 @@ export type AgentBackendSetReasoningInput = Omit<AgentSetReasoningInput, keyof A
   AgentBackendScopeKey;
 
 export type AgentBackendSetFastModeInput = Omit<AgentSetFastModeInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendUpdateTaskBriefInput = Omit<AgentUpdateTaskBriefInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendResetTaskBriefInput = Omit<AgentResetTaskBriefInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendReopenTaskInput = Omit<AgentReopenTaskInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendRecordOwnerVerificationInput = Omit<AgentRecordOwnerVerificationInput, keyof AgentScopeKey> &
+  AgentBackendScopeKey;
+
+export type AgentBackendAcceptTaskCompletionGapsInput = Omit<AgentAcceptTaskCompletionGapsInput, keyof AgentScopeKey> &
   AgentBackendScopeKey;
 
 export type AgentBackendInteractionResolution = AgentBackendScopeKey & AgentInteractionResolution;

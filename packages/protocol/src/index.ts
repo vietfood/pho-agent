@@ -11,3 +11,4 @@ export * from "./plan-agent";
 export * from "./session";
 export * from "./session-title";
 export * from "./skills";
+export * from "./task";

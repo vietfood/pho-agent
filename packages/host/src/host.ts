@@ -3,6 +3,7 @@ import {
   normalizeAgentBackendScopeKey,
   type AgentAbortInput,
   type AgentBackendAbortInput,
+  type AgentBackendAcceptTaskCompletionGapsInput,
   type AgentBackendDescriptor,
   type AgentBackendEvent,
   type AgentBackendFollowUpInput,
@@ -10,6 +11,9 @@ import {
   type AgentBackendPromptAdmission,
   type AgentBackendPromptInput,
   type AgentBackendQueueAdmission,
+  type AgentBackendRecordOwnerVerificationInput,
+  type AgentBackendReopenTaskInput,
+  type AgentBackendResetTaskBriefInput,
   type AgentBackendScope,
   type AgentBackendScopeKey,
   type AgentBackendSetModelInput,
@@ -17,11 +21,16 @@ import {
   type AgentBackendSetReasoningInput,
   type AgentBackendSessionSnapshot,
   type AgentBackendSteerInput,
+  type AgentBackendUpdateTaskBriefInput,
   type AgentFollowUpInput,
+  type AgentAcceptTaskCompletionGapsInput,
   type AgentInteractionResolution,
   type AgentPromptAdmission,
   type AgentPromptInput,
   type AgentQueueAdmission,
+  type AgentRecordOwnerVerificationInput,
+  type AgentReopenTaskInput,
+  type AgentResetTaskBriefInput,
   type AgentRuntimeEvent,
   type AgentScopeKey,
   type AgentSetModelInput,
@@ -29,6 +38,7 @@ import {
   type AgentSetReasoningInput,
   type AgentSessionSnapshot,
   type AgentSteerInput,
+  type AgentUpdateTaskBriefInput,
   type Unsubscribe,
 } from "@pho-agent/protocol";
 import { createAgentBackendRegistry } from "./registry";
@@ -45,6 +55,11 @@ export interface AgentBackendAdapter {
   steerRun?(input: AgentSteerInput): Promise<AgentQueueAdmission>;
   queueFollowUp?(input: AgentFollowUpInput): Promise<AgentQueueAdmission>;
   abortRun(input: AgentAbortInput): Promise<void>;
+  updateTaskBrief?(input: AgentUpdateTaskBriefInput): Promise<AgentSessionSnapshot>;
+  resetTaskBrief?(input: AgentResetTaskBriefInput): Promise<AgentSessionSnapshot>;
+  reopenTask?(input: AgentReopenTaskInput): Promise<AgentSessionSnapshot>;
+  recordOwnerVerification?(input: AgentRecordOwnerVerificationInput): Promise<AgentSessionSnapshot>;
+  acceptTaskCompletionGaps?(input: AgentAcceptTaskCompletionGapsInput): Promise<AgentSessionSnapshot>;
   resolveInteraction?(input: AgentScopeKey & AgentInteractionResolution): Promise<void>;
   subscribe(listener: (event: AgentRuntimeEvent) => void): Unsubscribe;
   dispose(): Promise<void>;
@@ -62,6 +77,11 @@ export interface AgentHost {
   steerRun(input: AgentBackendSteerInput): Promise<AgentBackendQueueAdmission>;
   queueFollowUp(input: AgentBackendFollowUpInput): Promise<AgentBackendQueueAdmission>;
   abortRun(input: AgentBackendAbortInput): Promise<void>;
+  updateTaskBrief(input: AgentBackendUpdateTaskBriefInput): Promise<AgentBackendSessionSnapshot>;
+  resetTaskBrief(input: AgentBackendResetTaskBriefInput): Promise<AgentBackendSessionSnapshot>;
+  reopenTask(input: AgentBackendReopenTaskInput): Promise<AgentBackendSessionSnapshot>;
+  recordOwnerVerification(input: AgentBackendRecordOwnerVerificationInput): Promise<AgentBackendSessionSnapshot>;
+  acceptTaskCompletionGaps(input: AgentBackendAcceptTaskCompletionGapsInput): Promise<AgentBackendSessionSnapshot>;
   resolveInteraction(input: AgentBackendInteractionResolution): Promise<void>;
   subscribe(listener: (event: AgentBackendEvent) => void): Unsubscribe;
   dispose(): Promise<void>;
@@ -89,7 +109,7 @@ export function createAgentHost(adapters: readonly AgentBackendAdapter[]): Agent
     return registry.resolve(backendId).adapter;
   }
 
-  function requireOperation<K extends "setModel" | "setReasoning" | "setFastMode" | "steerRun" | "queueFollowUp" | "resolveInteraction">(
+  function requireOperation<K extends "setModel" | "setReasoning" | "setFastMode" | "steerRun" | "queueFollowUp" | "resolveInteraction" | "updateTaskBrief" | "resetTaskBrief" | "reopenTask" | "recordOwnerVerification" | "acceptTaskCompletionGaps">(
     backendId: string,
     operation: K,
   ): NonNullable<AgentBackendAdapter[K]> {
@@ -194,6 +214,48 @@ export function createAgentHost(adapters: readonly AgentBackendAdapter[]): Agent
     async abortRun(input) {
       const normalized = normalizeAgentBackendScopeKey(input);
       await resolve(normalized.backendId).abortRun({ ...scopeKey(normalized), runId: input.runId });
+    },
+    async updateTaskBrief(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "updateTaskBrief")({
+        ...scopeKey(normalized),
+        content: input.content,
+        ...(input.status ? { status: input.status } : {}),
+        ...(input.expectedRevision ? { expectedRevision: input.expectedRevision } : {}),
+      });
+      return snapshot(normalized.backendId, value);
+    },
+    async resetTaskBrief(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "resetTaskBrief")({
+        ...scopeKey(normalized),
+        ...(input.expectedRevision ? { expectedRevision: input.expectedRevision } : {}),
+      });
+      return snapshot(normalized.backendId, value);
+    },
+    async reopenTask(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      return snapshot(
+        normalized.backendId,
+        await requireOperation(normalized.backendId, "reopenTask")(scopeKey(normalized)),
+      );
+    },
+    async recordOwnerVerification(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      const value = await requireOperation(normalized.backendId, "recordOwnerVerification")({
+        ...scopeKey(normalized),
+        outcome: input.outcome,
+        summary: input.summary,
+        ...(input.criterionId ? { criterionId: input.criterionId } : {}),
+      });
+      return snapshot(normalized.backendId, value);
+    },
+    async acceptTaskCompletionGaps(input) {
+      const normalized = normalizeAgentBackendScopeKey(input);
+      return snapshot(
+        normalized.backendId,
+        await requireOperation(normalized.backendId, "acceptTaskCompletionGaps")(scopeKey(normalized)),
+      );
     },
     async resolveInteraction(input) {
       const normalized = normalizeAgentBackendScopeKey(input);
