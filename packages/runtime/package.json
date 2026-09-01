@@ -5,6 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./approval-controller": "./src/approval-controller.ts",
+    "./approval-feature": "./src/approval-feature.ts",
+    "./approval-reviewer": "./src/approval-reviewer.ts",
     "./compaction-controller": "./src/compaction-controller.ts",
     "./context-continuity-feature": "./src/context-continuity-feature.ts",
     "./context-prompt-feature": "./src/context-prompt-feature.ts",

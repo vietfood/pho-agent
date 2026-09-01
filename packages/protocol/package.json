@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./approval": "./src/approval.ts",
     "./backend": "./src/backend.ts",
     "./compaction": "./src/compaction.ts",
     "./errors": "./src/errors.ts",
